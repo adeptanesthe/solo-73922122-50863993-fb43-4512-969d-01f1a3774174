@@ -218,6 +218,127 @@ def test_web_app():
     print("ok  网页端冒烟测试")
 
 
+def test_threshold_precision_web():
+    """阈值按输入十进制精确比较：80.000000000000001 不能把 80 分判为达标。"""
+    import io as _io
+    import re
+
+    import app as web
+
+    web.app.config.update(TESTING=True)
+    c = web.app.test_client()
+    # 分钟 10-12 为 80 分，14-18 为 95 分；阈值 80 时告警 [10,14]，
+    # 阈值 80.000000000000001 时告警只剩 [14]。
+    rows = []
+    for i in range(1, 31):
+        s = 80 if 10 <= i <= 12 else (95 if 14 <= i <= 18 else 0)
+        rows.append(f"{i},{s}")
+    text = "minute,score\n" + "\n".join(rows) + "\n"
+    c.post("/upload", data={"file": (_io.BytesIO(text.encode()), "t.csv")},
+           content_type="multipart/form-data")
+
+    def run(t):
+        r = c.post("/analyze", data={"threshold": t, "U": "20", "K": "1",
+                                     "intervals": "25-26"},
+                   follow_redirects=True)
+        return r.get_data(as_text=True)
+
+    html = run("80")
+    assert "本档参数下共 2 条告警" in html
+    assert "可承诺：L = 15 分钟" in html
+
+    html = run("80.000000000000001")
+    assert "本档参数下共 1 条告警" in html
+    assert "可承诺：L = 11 分钟" in html
+    # 表单与当前结论保留输入的精确阈值
+    assert 'name="threshold" value="80.000000000000001"' in html
+    assert "阈值 80.000000000000001" in html
+
+    # 科学计数法按十进制精确值解释
+    assert "可承诺：L = 15 分钟" in run("8e1")
+    assert "可承诺：L = 11 分钟" in run("8.0000000000000001e1")
+    assert 'name="threshold" value="8e1"' in run("8e1")
+
+    # 撤下后历史保留当时输入的精确阈值
+    html = run("80")
+    assert "已撤下" in html and "阈值8e1" in html
+    print("ok  阈值精确比较/科学计数法/表单与历史保留")
+
+
+def test_threshold_rejects_bad_values():
+    """NaN / 无穷 / 格式错误：报错，且当前结论与历史保持不变。"""
+    import io as _io
+
+    import app as web
+
+    web.app.config.update(TESTING=True)
+    c = web.app.test_client()
+    rows = [f"{i},{50 + i}" for i in range(1, 11)]
+    c.post("/upload",
+           data={"file": (_io.BytesIO(("minute,score\n" + "\n".join(rows) + "\n").encode()),
+                          "n.csv")},
+           content_type="multipart/form-data")
+    iv = "1-2\n5-6"
+    c.post("/analyze", data={"threshold": "NaN-test", "U": "5", "K": "1",
+                             "intervals": iv}, follow_redirects=True)  # 先制造一条历史
+    c.post("/analyze", data={"threshold": "55", "U": "5", "K": "1",
+                             "intervals": iv}, follow_redirects=True)
+    cur_html = c.get("/").get_data(as_text=True)
+    hist_before = cur_html.count("已撤下")
+
+    for bad in ["nan", "NaN", "-inf", "Infinity", "abc", "8e", "", "0x10", "1,5"]:
+        r = c.post("/analyze", data={"threshold": bad, "U": "5", "K": "1",
+                                     "intervals": iv}, follow_redirects=True)
+        html = r.get_data(as_text=True)
+        assert "参数未通过校验" in html, bad
+        assert "当前有效" in html, bad          # 当前结论仍在
+        assert html.count("已撤下") == hist_before, bad  # 历史未增加
+        assert f'name="threshold" value="{bad}"' in html, bad  # 回填本次输入
+    print("ok  NaN/无穷/格式错误被拒且保留结论与历史")
+
+
+def test_big_integer_scores():
+    """整批仅两档相邻的有符号 64 位大整数：页面可打开，折线分出高低，刻度可读。"""
+    import io as _io
+    import re
+
+    import app as web
+
+    web.app.config.update(TESTING=True)
+    c = web.app.test_client()
+    lo, hi = -(2 ** 63), 2 ** 63 - 1
+    rows = [f"{i},{hi if i % 2 else hi - 1}" for i in range(1, 11)]
+    c.post("/upload",
+           data={"file": (_io.BytesIO(("minute,score\n" + "\n".join(rows) + "\n").encode()),
+                          "big.csv")},
+           content_type="multipart/form-data")
+    r = c.post("/analyze", data={"threshold": str(hi), "U": "10", "K": "1",
+                                 "intervals": "1-10"}, follow_redirects=True)
+    assert r.status_code == 200
+    html = c.get("/").get_data(as_text=True)
+    assert "可承诺" in html or "无法承诺" in html
+    ys = {p.split(",")[1] for p in
+          re.search(r'<polyline points="([^"]+)"', html).group(1).split()}
+    assert len(ys) == 2, ys  # 相邻两档分到不同高度
+    labels = re.findall(r'text-anchor="end" fill="#888">([^<]+)</text>', html)
+    assert str(hi) in labels and str(hi - 1) in labels, labels
+    # 回放数据以字符串下发，避免 JS Number 精度丢失
+    replay = re.search(r'id="replay-data">(.*?)</script>', html, re.S).group(1)
+    assert f'"{hi}"' in replay and f'"{hi - 1}"' in replay
+
+    # 跨度拉到整个 64 位范围（含最小值）仍可打开
+    rows = [f"{i},{hi if i % 2 else lo}" for i in range(1, 11)]
+    c.post("/upload",
+           data={"file": (_io.BytesIO(("minute,score\n" + "\n".join(rows) + "\n").encode()),
+                          "wide.csv")},
+           content_type="multipart/form-data")
+    r = c.post("/analyze", data={"threshold": "0", "U": "10", "K": "1",
+                                 "intervals": "1-10"}, follow_redirects=True)
+    assert r.status_code == 200 and "参数未通过校验" not in r.get_data(as_text=True)
+    assert c.get("/").status_code == 200
+    print("ok  有符号 64 位大整数分值：图表/回放/刻度")
+
+
 def main():
     test_compute_alerts()
     rng = random.Random(20261124)
@@ -227,6 +348,9 @@ def main():
     test_monotonicity(rng)
     test_edge_cases()
     test_web_app()
+    test_threshold_precision_web()
+    test_threshold_rejects_bad_values()
+    test_big_integer_scores()
     print("\n全部自测通过。")
 
 

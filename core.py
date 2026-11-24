@@ -22,12 +22,20 @@
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
+from decimal import Decimal
 
 INF = 10 ** 18
 
 
 def compute_alerts(minutes, scores, threshold):
-    """每段连续达标（score >= threshold）只在首分钟产生一条告警，返回升序告警分钟列表。"""
+    """每段连续达标（score >= threshold）只在首分钟产生一条告警，返回升序告警分钟列表。
+
+    threshold 由网页端按输入文本解析为 Decimal，与整数分值做精确比较；例如
+    Decimal('80.000000000000001') > 80，因此 80 分不会被误判为达标。
+    """
+    if isinstance(threshold, float):
+        # 仅兼容外部调用；网页端不会传 float（float 会丢失十进制输入的精度）。
+        threshold = Decimal(str(threshold))
     alerts = []
     prev_ok = False
     for m, s in zip(minutes, scores):

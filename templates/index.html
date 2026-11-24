@@ -81,7 +81,7 @@
       </div>
       <label>卡纸可能时刻区间（每行一段；最多 {{ max_jams }} 段，每段至多 {{ max_span }} 个分钟号，各段互不重叠）</label>
       <textarea name="intervals" placeholder="如：&#10;125-130&#10;250 254&#10;370（单分钟）"
->{% if form.intervals %}{% for a,b in form.intervals %}{{ a }}-{{ b }}
+>{% if form.intervals_text is not none %}{{ form.intervals_text }}{% elif form.intervals %}{% for a,b in form.intervals %}{{ a }}-{{ b }}
 {% endfor %}{% endif %}</textarea>
       <div class="hint">每组卡纸时刻 = 各区间各取一分钟；只用卡纸前 L～U 分钟的告警做一对一配对。</div>
       <p><button type="submit">核定最大可承诺提前量 L</button></p>
@@ -103,7 +103,7 @@
   {% set r = current.result %}
   <section>
     <h2>④ 核定结论 <span class="tag ok">当前有效</span>
-      <span style="font-weight:400;font-size:12px;color:#6a737d">#{{ current.id }} · {{ current.time }} · 数据 {{ current.data_name }} · 阈值 {{ current.params.threshold }} · U={{ current.params.U }} · K={{ current.params.K }} · 耗时 {{ r.elapsed_ms }}ms</span></h2>
+      <span style="font-weight:400;font-size:12px;color:#6a737d">#{{ current.id }} · {{ current.time }} · 数据 {{ current.data_name }} · 阈值 {{ current.params.threshold_input }} · U={{ current.params.U }} · K={{ current.params.K }} · 耗时 {{ r.elapsed_ms }}ms</span></h2>
 
     {% if r.status == 'ok' %}
       <div class="banner ok">可承诺：L = {{ r.L }} 分钟（1≤L≤U={{ r.U }} 范围内的最大值）。任意卡纸时刻组合至少命中 {{ r.min_hits }} 次 ≥ K={{ r.K }}。</div>
@@ -143,12 +143,12 @@
   <section>
     <h2>⑤ 历史结论（已撤下）</h2>
     <table>
-      <tr><th>#</th><th>时间</th><th>数据</th><th>参数</th><th>结论</th><th>状态</th></tr>
+      <tr><th>#</th><th>时间</th><th>数据</th><th>参数（输入的精确阈值）</th><th>结论</th><th>状态</th></tr>
       {% for e in history %}
       <tr>
         <td>{{ e.id }}</td><td>{{ e.time }}</td>
         <td>{{ e.data_name }}（{{ e.data_rows }}行）</td>
-        <td>阈值{{ e.params.threshold }} U={{ e.params.U }} K={{ e.params.K }} 区间{{ e.params.intervals|length }}段</td>
+        <td>阈值{{ e.params.get('threshold_input', e.params.threshold) }} U={{ e.params.U }} K={{ e.params.K }} 区间{{ e.params.intervals|length }}段</td>
         <td>{{ summarize(e) }}</td>
         <td><span class="tag off">已撤下</span><br><span style="font-size:11px;color:#6a737d">{{ e.withdraw_reason }}</span></td>
       </tr>
@@ -171,6 +171,7 @@
   var readout = document.getElementById('readout');
   var cursor = document.getElementById('cursor');
   var g = d.geom, alerts = new Set(d.alerts);
+  // 分值以字符串下发（有符号 64 位整数超出 JS Number 安全范围），这里只做原样显示
   function show() {
     var i = +slider.value, m = d.minutes[i], s = d.scores[i];
     var x = g.ml + (m - g.x0) * g.pw / (g.x1 - g.x0);
